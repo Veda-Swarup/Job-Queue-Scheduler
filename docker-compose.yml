@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: jobqueue-postgres
+    environment:
+      POSTGRES_USER: jobqueue
+      POSTGRES_PASSWORD: jobqueue
+      POSTGRES_DB: jobqueue
+    ports:
+      - "5432:5432"
+    volumes:
+      - jobqueue-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jobqueue"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  jobqueue-data:
