@@ -76,14 +76,61 @@ Verified with:
 
 **Note:** schema was typed directly into `psql`, not yet saved as a migration file on disk (e.g. `migrations/0001_init.sql`). Worth doing before moving much further, so the schema has a durable record outside the running container.
 
-## Step 3: Enqueue path — NOT STARTED
+Step 3, Part 1: DB Connection Pool (internal/db/db.go)
+1. Create the file
+From your jqs project root:
+mkdir -p internal/db
+(Harmless if the folder already exists from step 1.)
+Create internal/db/db.go with this content:
+// Package db handles the Postgres connection pool used by every component
+// (enqueue API, workers, reaper, scheduler). Everything shares one pool
+// setup so connection settings stay consistent across the project.
+package db
 
-## Step 4: Atomic claim query (`FOR UPDATE SKIP LOCKED`) — NOT STARTED
+import (
+	"context"
+	"fmt"
+	"os"
 
-## Step 5: Multiple worker processes, prove no duplicate claims — NOT STARTED
+	"github.com/jackc/pgx/v5/pgxpool"
+)
 
-## Step 6: Heartbeat + reaper — NOT STARTED
+// New creates a pgx connection pool using DATABASE_URL from the environment,
+// falling back to sane local-dev defaults that match docker-compose.yml.
+func New(ctx context.Context) (*pgxpool.Pool, error) {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		dsn = "postgres://jobqueue:jobqueue@localhost:5432/jobqueue?sslmode=disable"
+	}
 
-## Step 7: Fencing token (`lock_version`) — NOT STARTED
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		return nil, fmt.Errorf("creating pgx pool: %w", err)
+	}
 
-## Step 8: Retries with backoff + jitter, then DLQ — NOT STARTED
+	if err := pool.Ping(ctx); err != nil {
+		return nil, fmt.Errorf("pinging postgres: %w", err)
+	}
+
+	return pool, nil
+}
+2. Fetch the pgx dependency
+From the project root (where go.mod lives):
+go get github.com/jackc/pgx/v5
+This downloads the pgx Postgres driver and adds it to go.mod, plus generates a go.sum lock file (auto-managed — don't hand-edit it).
+3. Confirm it worked
+Open go.mod and check for a line like:
+require github.com/jackc/pgx/v5 v5.6.0
+4. Sanity-check the code compiles
+go build ./...
+No output = success. internal/db isn't called from anywhere yet, so this just confirms the package itself compiles cleanly.
+Troubleshooting:
+package jobqueue/internal/db: no Go files → the file didn't save at the expected path; check internal/db/db.go exists exactly there.
+Import error mentioning pgxpool → step 2 (go get) likely didn't complete; rerun it.
+Design notes (why it's built this way)
+pgxpool, not a single connection: the API and workers will do things concurrently, so a pool that safely hands out/reuses connections across goroutines is needed, rather than one connection everyone contends for.
+Ping right after creating the pool: pgxpool.New doesn't connect immediately — it sets the pool up lazily. Ping forces a real connection attempt at startup, so a Postgres-unreachable problem surfaces immediately instead of on your first real query.
+DATABASE_URL env var with a fallback: lets you point at a different database later (CI, different credentials) with zero code changes, while still working out of the box against your current Docker setup.
+Next up
+Once go build ./... runs clean, this piece is done. Next piece: the Enqueue function in internal/job that actually inserts a job row.
+

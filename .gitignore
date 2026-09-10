@@ -1,0 +1,8 @@
+# Binaries
+bin/
+
+# Execution logs (local-only, not committed)
+execution.txt
+steps.md
+# OS junk
+.DS_Store
