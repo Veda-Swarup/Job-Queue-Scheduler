@@ -241,6 +241,128 @@ func Reap(ctx context.Context, pool *pgxpool.Pool, staleAfter time.Duration) (in
 	return tag.RowsAffected(), nil
 }
 
+// QueueStats holds aggregate counts for a queue, used by the /stats endpoint.
+type QueueStats struct {
+	Pending int64 `json:"pending"`
+	Running int64 `json:"running"`
+	Done    int64 `json:"done"`
+	Dead    int64 `json:"dead"`
+	Total   int64 `json:"total"`
+}
+
+// Stats returns aggregate job counts grouped by status for the given queue.
+// If queueName is empty, counts across all queues.
+func Stats(ctx context.Context, pool *pgxpool.Pool, queueName string) (*QueueStats, error) {
+	var query string
+	var args []any
+
+	if queueName != "" {
+		query = `SELECT status, count(*) FROM jobs WHERE queue_name = $1 GROUP BY status`
+		args = []any{queueName}
+	} else {
+		query = `SELECT status, count(*) FROM jobs GROUP BY status`
+	}
+
+	rows, err := pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("stats: %w", err)
+	}
+	defer rows.Close()
+
+	s := &QueueStats{}
+	for rows.Next() {
+		var status string
+		var count int64
+		if err := rows.Scan(&status, &count); err != nil {
+			return nil, fmt.Errorf("stats scan: %w", err)
+		}
+		switch status {
+		case "pending":
+			s.Pending = count
+		case "running":
+			s.Running = count
+		case "done":
+			s.Done = count
+		case "dead":
+			s.Dead = count
+		}
+		s.Total += count
+	}
+	return s, rows.Err()
+}
+
+// GetByID returns a single job by ID, or nil if not found.
+func GetByID(ctx context.Context, pool *pgxpool.Pool, id int64) (*Job, error) {
+	row := pool.QueryRow(ctx, `
+		SELECT id, queue_name, payload, status, priority, run_at,
+		       attempts, max_attempts, locked_by, lock_version,
+		       last_error, created_at
+		FROM jobs WHERE id = $1`, id)
+
+	j := &Job{}
+	err := row.Scan(
+		&j.ID, &j.QueueName, &j.Payload, &j.Status,
+		&j.Priority, &j.RunAt, &j.Attempts, &j.MaxAttempts,
+		&j.LockedBy, &j.LockVersion, &j.LastError, &j.CreatedAt,
+	)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get job %d: %w", id, err)
+	}
+	return j, nil
+}
+
+// ReplayDead re-enqueues a dead job by resetting it to pending with attempt
+// counters cleared. Returns the job ID, or 0 if the job was not in dead status.
+func ReplayDead(ctx context.Context, pool *pgxpool.Pool, id int64) (int64, error) {
+	var jobID int64
+	err := pool.QueryRow(ctx, `
+		UPDATE jobs
+		SET    status     = 'pending',
+		       attempts   = 0,
+		       locked_by  = NULL,
+		       locked_at  = NULL,
+		       last_error = NULL,
+		       run_at     = now()
+		WHERE  id     = $1
+		  AND  status = 'dead'
+		RETURNING id`, id).Scan(&jobID)
+	if err == pgx.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("replay job %d: %w", id, err)
+	}
+	return jobID, nil
+}
+
+// WorkerUtilization returns a map of worker_id → number of jobs currently
+// running. Used by /metrics to expose per-worker utilization.
+func WorkerUtilization(ctx context.Context, pool *pgxpool.Pool) (map[string]int64, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT locked_by, count(*)
+		FROM   jobs
+		WHERE  status = 'running' AND locked_by IS NOT NULL
+		GROUP BY locked_by`)
+	if err != nil {
+		return nil, fmt.Errorf("worker utilization: %w", err)
+	}
+	defer rows.Close()
+
+	util := make(map[string]int64)
+	for rows.Next() {
+		var worker string
+		var count int64
+		if err := rows.Scan(&worker, &count); err != nil {
+			return nil, fmt.Errorf("worker utilization scan: %w", err)
+		}
+		util[worker] = count
+	}
+	return util, rows.Err()
+}
+
 // pow2 returns 2^n (integer exponent, float result).
 func pow2(n float64) float64 {
 	r := 1.0

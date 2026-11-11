@@ -1,8 +1,35 @@
-# Binaries
-bin/
+# Go build outputs (root commands and optional output directories)
+/bin/
+/dist/
+/api
+/worker
+/bench
+*.exe
+*.test
+*.out
+/coverage/
+/coverage.txt
+/coverage.html
 
-# Execution logs (local-only, not committed)
-execution.txt
-steps.md
-# OS junk
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+!.env.*.example
+/.aws/
+
+# Local execution notes and interview preparation
+/execution.txt
+/steps.md
+/jqs_interview_prep.md
+
+# Editor and operating system files
 .DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log

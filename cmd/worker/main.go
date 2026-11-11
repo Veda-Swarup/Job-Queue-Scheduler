@@ -18,6 +18,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -26,6 +27,16 @@ import (
 	"jqs/internal/db"
 	"jqs/internal/job"
 )
+
+// workerStats tracks aggregate metrics across all goroutines in this process.
+// Updated atomically so no mutex is needed.
+type workerStats struct {
+	completed     atomic.Int64
+	failed        atomic.Int64
+	totalDuration atomic.Int64 // nanoseconds
+}
+
+var stats workerStats
 
 func main() {
 	workerID := flag.String("id", defaultWorkerID(), "unique worker identifier")
@@ -63,6 +74,17 @@ func main() {
 
 	for range *concurrency {
 		<-done
+	}
+
+	// Log shutdown stats.
+	completed := stats.completed.Load()
+	failed := stats.failed.Load()
+	total := completed + failed
+	totalDur := time.Duration(stats.totalDuration.Load())
+	if total > 0 {
+		avg := totalDur / time.Duration(total)
+		log.Printf("[%s] stats — processed=%d completed=%d failed=%d avg_duration=%s total_duration=%s",
+			*workerID, total, completed, failed, avg, totalDur)
 	}
 	log.Printf("[%s] shut down cleanly", *workerID)
 }
@@ -133,6 +155,8 @@ func execute(
 	workerID string,
 	heartbeatInterval time.Duration,
 ) {
+	start := time.Now()
+
 	// Step 6: heartbeat goroutine keeps last_heartbeat fresh while we work.
 	// Cancelled as soon as execute returns so we stop sending stale heartbeats.
 	hbCtx, hbCancel := context.WithCancel(ctx)
@@ -157,12 +181,16 @@ func execute(
 	// In a real system this is where you'd call send-email, process-image, etc.
 	jobErr := simulateWork(j)
 
+	elapsed := time.Since(start)
+	stats.totalDuration.Add(int64(elapsed))
+
 	if jobErr == nil {
 		// Step 7: fencing token — Complete only succeeds if lock_version matches.
 		if err := job.Complete(ctx, pool, j.ID, j.LockVersion); err != nil {
 			log.Printf("[%s] complete job %d: %v", workerID, j.ID, err)
 		} else {
-			log.Printf("[%s] completed job %d", workerID, j.ID)
+			log.Printf("[%s] completed job %d (%s)", workerID, j.ID, elapsed)
+			stats.completed.Add(1)
 		}
 	} else {
 		// Step 8: retry with backoff + jitter, or DLQ if exhausted.
@@ -170,6 +198,7 @@ func execute(
 		if err := job.Fail(ctx, pool, j, jobErr); err != nil {
 			log.Printf("[%s] fail job %d: %v", workerID, j.ID, err)
 		}
+		stats.failed.Add(1)
 	}
 }
 
@@ -198,3 +227,4 @@ func defaultWorkerID() string {
 	host, _ := os.Hostname()
 	return fmt.Sprintf("%s-%d", host, os.Getpid())
 }
+
