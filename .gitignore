@@ -23,6 +23,15 @@
 /steps.md
 /jqs_interview_prep.md
 
+# Supplementary documentation kept locally
+/BENCHMARK.md
+/CODEBASE.md
+/DESCRIPTION.md
+/RUN.md
+/TESTING.md
+/TODO.md
+/about.md
+
 # Editor and operating system files
 .DS_Store
 Thumbs.db
